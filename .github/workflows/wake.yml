@@ -1,0 +1,57 @@
+name: sprite-sched wake
+
+# External clock for an evener sprite (a Fly.io Sprite). The sprite pauses
+# ~30s after inbound activity stops and only inbound HTTP can wake it, so
+# this workflow is the one component that must run outside the machine. It
+# checks due.json every 5 minutes (GitHub cron floor; timing is best-effort)
+# and pings the sprite's public URL only when a job is due — the sprite stays
+# asleep otherwise. After a delivered ping it marks the entries fired so each
+# job wakes the machine at most once. due.json holds only opaque ids and
+# times; the wake URL lives in the SPRITE_URL repo secret, never in the repo.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: guard
+        env:
+          SPRITE_URL: ${{ secrets.SPRITE_URL }}
+        run: |
+          if [ -z "$SPRITE_URL" ]; then echo "::error::SPRITE_URL secret is not set; cannot wake"; exit 1; fi
+      - name: ping sprite if anything is due
+        env:
+          SPRITE_URL: ${{ secrets.SPRITE_URL }}
+        run: |
+          set -u
+          now=$(date -u +%s)
+          count=$(jq --argjson now "$now" '[.jobs[] | select((.fired | not) and (.due_epoch <= $now))] | length' due.json)
+          echo "due and unfired: $count"
+          if [ "$count" -gt 0 ]; then
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$SPRITE_URL/?src=sprite-sched" || echo 000)
+            echo "wake ping -> HTTP $code"
+            if [ "$code" != "000" ]; then
+              jq --argjson now "$now" \
+                '(.jobs[] | select((.fired | not) and (.due_epoch <= $now)) | .fired) = true' \
+                due.json > due.json.tmp && mv due.json.tmp due.json
+            fi
+          fi
+      - name: record fired state
+        run: |
+          if git diff --quiet; then
+            echo "nothing fired; no commit"
+          else
+            git config user.name "sprite-sched bot"
+            git config user.email "actions@users.noreply.github.com"
+            git add due.json
+            git commit -m "mark due jobs fired $(date -u +%FT%TZ)"
+            git push
+          fi

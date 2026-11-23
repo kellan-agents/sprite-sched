@@ -1,0 +1,20 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install tools
+        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: due.json is parseable
+        run: jq empty due.json
+      - name: no wake URL in tracked files
+        run: |
+          # The needle is concatenated so this workflow file itself does not
+          # carry the string it checks for.
+          needle="sprites"".app"
+          if grep -rn -e "$needle" .github/ README.md due.json; then
+            echo "::error::wake URL must live in the SPRITE_URL secret, never in tracked files"
+            exit 1
+          fi

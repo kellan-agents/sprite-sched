@@ -1,0 +1,43 @@
+name: ping-at
+
+# Guaranteed one-shot wake for a specific moment. The */5 cron in wake.yml
+# can take a while to activate on a new repo, so for a scheduled run whose
+# time matters NOW, dispatch this workflow with `at` set: the runner idles
+# until the moment, then pings the sprite. Public repo → free minutes.
+# The wake.yml cron takes over once GitHub activates its schedule.
+# The wake URL lives in the SPRITE_URL repo secret, never in the repo.
+
+on:
+  workflow_dispatch:
+    inputs:
+      at:
+        description: "UTC ISO time to ping at, e.g. 2026-11-22T23:00:30Z"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: guard
+        env:
+          SPRITE_URL: ${{ secrets.SPRITE_URL }}
+        run: |
+          if [ -z "$SPRITE_URL" ]; then echo "::error::SPRITE_URL secret is not set; cannot wake"; exit 1; fi
+      - name: wait and ping
+        env:
+          SPRITE_URL: ${{ secrets.SPRITE_URL }}
+        run: |
+          target=$(date -u -d "${{ inputs.at }}" +%s) || { echo "bad time"; exit 1; }
+          echo "target epoch: $target"
+          while [ "$(date -u +%s)" -lt "$target" ]; do
+            left=$(( target - $(date -u +%s) ))
+            [ "$left" -gt 3600 ] && { echo "more than 1h away; aborting to save runner time"; exit 1; }
+            sleep "$(( left > 30 ? 30 : left ))"
+          done
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 "$SPRITE_URL/?src=sprite-sched-ping-at" || echo 000)
+          echo "wake ping at $(date -u +%FT%TZ) -> HTTP $code"
+          [ "$code" != "000" ]
